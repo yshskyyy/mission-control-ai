@@ -135,6 +135,7 @@ def test_prompt_contains_history_weak_points_mastery_and_goal(monkeypatch):
         captured["prompt"] = args[3]
         return None
     monkeypatch.setattr(ai, "_pydantic_call", capture_prompt)
+    monkeypatch.setattr(ai, "_mark_fallback_after_failure", lambda *args: None)
     task = {"id": "task", "title": "任务", "description": "说明", "goal_title": "长期目标",
             "desired_outcome": "上线产品", "current_level": "初级"}
     section = {"title": "缓存", "objective": "理解一致性", "content": "缓存正文", "example": "缓存例子"}
