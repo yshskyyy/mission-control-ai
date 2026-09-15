@@ -10,6 +10,7 @@ from typing import Callable
 
 from app import ai, db, intelligence, repository, services
 from app.config import settings as application_settings
+from app.schemas import GoalCreate
 from evals.graders import grade_assessment, grade_plan, grade_recommendation, grade_teaching
 
 
@@ -30,7 +31,7 @@ def load_jsonl(suite: str) -> list[dict]:
 
 
 def run_planning(case: dict) -> tuple[list[dict], str]:
-    goal = repository.create_goal(case["goal"])
+    goal = repository.create_goal(GoalCreate.model_validate(case["goal"]).model_dump(mode="json"))
     plan = services.create_plan(goal["id"])
     return grade_plan(goal, plan), plan["rationale"]
 

@@ -1,6 +1,7 @@
 from pathlib import Path
 from contextlib import asynccontextmanager
 import json
+import os
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -8,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from app import repository, services
+from app.config import settings
 from app.auth import (
     create_access_token, current_user, ensure_goal_owner, ensure_task_owner,
     hash_password, verify_password,
@@ -22,24 +24,31 @@ from app.schemas import (
 )
 
 
-static_dir = Path(__file__).parent / "static"
+static_dir = Path(os.getenv("STATIC_DIR", Path(__file__).parent / "static"))
+index_file = static_dir / "index.html"
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    if settings.is_production and not index_file.is_file():
+        raise RuntimeError(
+            f"Frontend build is missing: expected {index_file}. Run the Vite build before startup."
+        )
     init_db()
     yield
 
 
 app = FastAPI(title="Mission Control AI", version="2.0.0", lifespan=lifespan)
-app.mount("/static", StaticFiles(directory=static_dir), name="static")
-app.mount("/assets", StaticFiles(directory=static_dir / "assets"), name="assets")
+app.mount("/static", StaticFiles(directory=static_dir, check_dir=False), name="static")
+app.mount("/assets", StaticFiles(directory=static_dir / "assets", check_dir=False), name="assets")
 configure_observability(app)
 
 
 @app.get("/", include_in_schema=False)
 def index():
-    return FileResponse(static_dir / "index.html")
+    if not index_file.is_file():
+        raise HTTPException(503, "Frontend build is unavailable; run npm --prefix frontend run build")
+    return FileResponse(index_file)
 
 
 @app.get("/health")
@@ -346,4 +355,6 @@ def spa_fallback(full_path: str):
     first_segment = full_path.split("/", 1)[0]
     if first_segment in reserved:
         raise HTTPException(404, "Not found")
-    return FileResponse(static_dir / "index.html")
+    if not index_file.is_file():
+        raise HTTPException(503, "Frontend build is unavailable; run npm --prefix frontend run build")
+    return FileResponse(index_file)
