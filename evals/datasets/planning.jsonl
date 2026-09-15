@@ -1,0 +1,4 @@
+{"id":"plan-python-6h","goal":{"title":"掌握 LangGraph 工程实践","current_level":"会 Python 和基础 LLM API","desired_outcome":"完成支持暂停恢复和测试的学习助手","deadline":"2026-12-31","weekly_hours":6,"learning_preferences":"官方文档和动手项目"}}
+{"id":"plan-cv-3h","goal":{"title":"学习计算机视觉工程","current_level":"会 Python，不熟悉深度学习","desired_outcome":"完成一个带测试的图像分类服务","deadline":"2027-01-31","weekly_hours":3,"learning_preferences":"边做边学"}}
+{"id":"plan-system-1h","goal":{"title":"掌握分布式系统基础","current_level":"了解网络和数据库","desired_outcome":"能解释一致性并完成一个最小实践","deadline":"2027-02-28","weekly_hours":1,"learning_preferences":"书籍和实验"}}
+{"id":"plan-frontend-10h","goal":{"title":"提升前端工程能力","current_level":"会基础 JavaScript","desired_outcome":"独立上线一个有测试的 React 应用","deadline":"2026-11-30","weekly_hours":10,"learning_preferences":"项目驱动"}}

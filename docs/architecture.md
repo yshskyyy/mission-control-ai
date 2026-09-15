@@ -1,35 +1,67 @@
-# Architecture Decision: MVP modular monolith
+# Architecture: production modular monolith
 
-## Context
+## System view
 
-The product needs a complete evidence-driven learning loop before it needs distributed scale. The current user count is one, while model calls and plan evaluation remain the main sources of uncertainty.
+```text
+React 19 + TypeScript + Vite + React Flow
+                  │ HTTPS / JWT
+                  ▼
+FastAPI API ── services ── AI gateway (OpenAI + deterministic fallback)
+    │              │                 │
+    │              └──── LangGraph resumable recommendation workflow
+    │                                │
+    ├── SQLAlchemy Core ── PostgreSQL (business state, users, audit runs)
+    ├── RQ ─────────────── Redis AOF (durable ingestion queue)
+    ├── Prometheus /metrics, OpenTelemetry OTLP, Sentry
+    └── static React production bundle
 
-## Decision
+Scheduler ── RQ ── Queue worker ── LangGraph ── PostgreSQL
+                                   └── checkpoint store
+```
 
-Use a FastAPI modular monolith backed by SQLite. Keep API validation, application services, AI integration and persistence in separate modules. Provide a deterministic local AI fallback so development and demonstrations do not depend on an external service.
+SQLite remains supported only as a zero-dependency local/test profile. Hosted
+deployments use PostgreSQL and apply the Alembic migration before the API starts.
 
 ## Boundaries
 
-- `app/main.py`: HTTP transport only
-- `app/services.py`: use-case orchestration and deterministic constraints
-- `app/ai.py`: structured model calls, prompt versions and fallback behavior
-- `app/repository.py`: persistence operations
-- `app/db.py`: schema and transaction boundary
-- `app/static/`: dependency-free browser client
+- `frontend/`: authenticated React SPA and interactive knowledge graph.
+- `app/main.py`: HTTP transport, authorization and ownership checks.
+- `app/services.py`: use cases and deterministic business constraints.
+- `app/ai.py`: structured model calls, prompt versions and local fallback.
+- `app/intelligence.py`: untrusted GitHub/news collection and scoring.
+- `app/workflows.py`: resumable LangGraph recommendation workflow.
+- `app/queueing.py`, `app/jobs.py`, `app/worker.py`: Redis/RQ dispatch, jobs and scheduler.
+- `app/repository.py`: persistence through the SQLAlchemy connection boundary.
+- `app/models.py`, `migrations/`: portable schema and versioned migrations.
+- `app/observability.py`: request IDs, metrics, traces and error reporting.
 
-The AI layer proposes plans and assessments. Application code enforces time budgets, statuses and plan activation.
+## Security and tenancy
 
-## Evolution triggers
+Passwords are Argon2 hashes. Short-lived HS256 bearer tokens identify a user;
+every goal-scoped route verifies ownership before reading or mutating state.
+`AUTH_DISABLED=true` is restricted to local demos/tests and maps requests to the
+seeded local user.
 
-Introduce PostgreSQL when concurrent writes, hosted deployment or richer querying make SQLite limiting.
+## AI and workflow policy
 
-Introduce a queue when plan generation and assessment need durable background execution rather than request-response calls.
+Interactive plan, assessment and tutor endpoints are async FastAPI handlers and
+move blocking SDK work to the thread pool so the event loop remains available.
+Long-running trend ingestion is persisted as a database job and dispatched to RQ
+with retries. LangGraph owns workflow control/checkpoints, not business entities.
+Model output is schema-validated; application code owns budgets, permissions,
+status transitions and plan versioning.
 
-Introduce LangGraph for a weekly replanning workflow when it requires multiple model/tool steps, checkpoint recovery and an approval pause. It should not own core business entities.
+## Data and failure behavior
 
-## Known MVP limitations
+- PostgreSQL is the source of truth; Redis is transport, never the business record.
+- Recommendation writes are idempotent and external content is untrusted.
+- Only an accepted recommendation may create a module and update the graph.
+- Redis failure falls back to an in-process task for local availability.
+- SQLite LangGraph checkpoints use the shared worker volume. A future multi-host
+  deployment should move checkpoints to a PostgreSQL checkpointer.
 
-- External repository links are stored but not fetched or verified.
-- AI operations execute synchronously.
-- Authentication is omitted because the first deployment is personal/local.
-- Weekly replanning carries incomplete tasks forward; it does not yet optimize a new dependency graph.
+## Deployment units
+
+`compose.yaml` runs PostgreSQL, Redis, the API, an RQ worker and the periodic
+intelligence scheduler. The API applies `alembic upgrade head` at startup. The
+Docker image builds the React bundle in a Node stage and serves it from FastAPI.

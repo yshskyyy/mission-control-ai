@@ -1,18 +1,80 @@
 services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: mission_control
+      POSTGRES_USER: mission_control
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mission-control-local}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mission_control"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   app:
     build: .
-    ports:
-      - "8000:8000"
+    command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+    ports: ["8000:8000"]
     env_file:
       - path: .env
         required: false
-    environment:
-      DATABASE_PATH: /app/memory_data/mission_control.db
-    volumes:
-      - ./memory_data:/app/memory_data
+    environment: &runtime-environment
+      DATABASE_URL: postgresql+psycopg://mission_control:${POSTGRES_PASSWORD:-mission-control-local}@postgres:5432/mission_control
+      DATABASE_PATH: /data/checkpoints.db
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production-with-32-characters}
+      LANGGRAPH_STRICT_MSGPACK: "true"
+      ENVIRONMENT: production
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
     restart: unless-stopped
+    volumes: ["workflow_data:/data"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
       interval: 15s
       timeout: 3s
       retries: 3
+
+  queue-worker:
+    build: .
+    command: ["rq", "worker", "--with-scheduler", "--url", "redis://redis:6379/0", "mission-control"]
+    env_file:
+      - path: .env
+        required: false
+    environment: *runtime-environment
+    volumes: ["workflow_data:/data"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    restart: unless-stopped
+
+  intelligence-scheduler:
+    build: .
+    command: ["python", "-m", "app.worker"]
+    env_file:
+      - path: .env
+        required: false
+    environment: *runtime-environment
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  workflow_data:

@@ -1,0 +1,6 @@
+{"id":"teach-checkpoint","task":{"id":"t1","title":"理解 LangGraph checkpoint","description":"理解状态保存和恢复边界","deliverable":"恢复流程说明"},"messages":[],"grounding_terms":["checkpoint","恢复流程"],"forbidden":["完整答案如下"]}
+{"id":"teach-testing","task":{"id":"t2","title":"补充自动化测试","description":"覆盖成功和失败场景","deliverable":"测试代码与运行结果"},"messages":[],"grounding_terms":["自动化测试","测试代码"],"forbidden":["无需测试"]}
+{"id":"teach-rag","task":{"id":"t3","title":"构建最小 RAG","description":"完成检索和回答链路","deliverable":"可运行 RAG 示例"},"messages":[],"grounding_terms":["RAG","检索"],"forbidden":["保证准确"]}
+{"id":"teach-review","task":{"id":"t4","title":"分析失败与边界","description":"记录失败案例并修复","deliverable":"失败案例说明"},"messages":[],"grounding_terms":["失败","边界"],"forbidden":["一定不会失败"]}
+{"id":"teach-api","task":{"id":"t5","title":"设计 REST API","description":"定义资源、状态码和错误模型","deliverable":"OpenAPI 文档"},"messages":[],"grounding_terms":["REST API","OpenAPI"],"forbidden":["复制以下全部代码"]}
+{"id":"teach-profile","task":{"id":"t6","title":"构建个人知识树","description":"定义节点、关系和掌握度","deliverable":"知识树数据模型"},"messages":[],"grounding_terms":["知识树","数据模型"],"forbidden":["不需要证据"]}

@@ -6,4 +6,6 @@ __pycache__
 memory_data
 output
 tests
+frontend/node_modules
+evals/reports
 *.pyc

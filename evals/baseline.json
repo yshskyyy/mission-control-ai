@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "minimum_overall_pass_rate": 0.95,
+  "minimum_suite_pass_rate": {
+    "planning": 1.0,
+    "teaching": 0.8,
+    "assessment": 1.0,
+    "recommendation": 1.0
+  }
+}
