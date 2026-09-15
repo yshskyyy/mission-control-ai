@@ -225,7 +225,35 @@ def init_db() -> None:
                 latency_ms INTEGER NOT NULL DEFAULT 0,
                 error TEXT,
                 created_at TEXT NOT NULL,
-                user_id TEXT REFERENCES users(id)
+                user_id TEXT REFERENCES users(id),
+                provider TEXT NOT NULL DEFAULT 'local',
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                estimated_cost REAL,
+                retry_count INTEGER NOT NULL DEFAULT 0
+                ,correlation_id TEXT
+                ,logical_request_id TEXT REFERENCES ai_logical_requests(logical_request_id)
+                ,attempt_id TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS ai_logical_requests (
+                logical_request_id TEXT PRIMARY KEY,
+                correlation_id TEXT NOT NULL,
+                run_type TEXT NOT NULL,
+                prompt_version TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                user_id TEXT REFERENCES users(id),
+                final_outcome TEXT CHECK (final_outcome IS NULL OR final_outcome IN
+                    ('MODEL_SUCCESS','FALLBACK_SUCCESS','TOTAL_FAILURE')),
+                provider_backed INTEGER NOT NULL DEFAULT 0,
+                schema_failure INTEGER NOT NULL DEFAULT 0,
+                attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+                final_provider TEXT,
+                final_model TEXT,
+                created_at TEXT NOT NULL,
+                completed_at TEXT,
+                started_at TEXT NOT NULL,
+                finalized_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS teaching_sessions (
@@ -536,12 +564,37 @@ def init_db() -> None:
         ai_columns = {row[1] for row in conn.execute("PRAGMA table_info(ai_runs)")}
         if "user_id" not in ai_columns:
             conn.execute("ALTER TABLE ai_runs ADD COLUMN user_id TEXT REFERENCES users(id)")
+        for definition in (
+            "provider TEXT NOT NULL DEFAULT 'local'",
+            "input_tokens INTEGER NOT NULL DEFAULT 0",
+            "output_tokens INTEGER NOT NULL DEFAULT 0",
+            "estimated_cost REAL NOT NULL DEFAULT 0",
+            "retry_count INTEGER NOT NULL DEFAULT 0",
+            "correlation_id TEXT",
+            "logical_request_id TEXT",
+            "attempt_id TEXT",
+        ):
+            name = definition.split()[0]
+            if name not in ai_columns:
+                conn.execute(f"ALTER TABLE ai_runs ADD COLUMN {definition}")
+        conn.execute("UPDATE ai_runs SET provider='openai' WHERE status!='FALLBACK' AND model!='local'")
         conn.execute(
             """INSERT INTO users (id,email,password_hash,display_name,is_active,created_at)
             VALUES (?,?,?,?,1,?) ON CONFLICT(id) DO NOTHING""",
             (LOCAL_USER_ID, "local@mission-control.invalid", "!", "Local User", utc_now()),
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_goals_user ON learning_goals(user_id,status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_runs_correlation ON ai_runs(correlation_id,logical_request_id,created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_runs_user_created ON ai_runs(user_id,created_at)")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_runs_attempt_id ON ai_runs(attempt_id) WHERE attempt_id IS NOT NULL")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_logical_user_created ON ai_logical_requests(user_id,created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_logical_correlation ON ai_logical_requests(correlation_id,logical_request_id)")
+        logical_columns = {row[1] for row in conn.execute("PRAGMA table_info(ai_logical_requests)").fetchall()}
+        if "started_at" not in logical_columns:
+            conn.execute("ALTER TABLE ai_logical_requests ADD COLUMN started_at TEXT")
+            conn.execute("UPDATE ai_logical_requests SET started_at=created_at WHERE started_at IS NULL")
+        if "finalized_at" not in logical_columns:
+            conn.execute("ALTER TABLE ai_logical_requests ADD COLUMN finalized_at TEXT")
         conn.commit()
     finally:
         conn.close()

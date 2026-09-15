@@ -24,10 +24,21 @@ class Settings:
     sentry_dsn: str | None = os.getenv("SENTRY_DSN")
     otel_exporter_endpoint: str | None = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
     environment: str = os.getenv("ENVIRONMENT", "development")
+    ai_input_cost_per_million: float = float(os.getenv("AI_INPUT_COST_PER_MILLION", "0"))
+    ai_output_cost_per_million: float = float(os.getenv("AI_OUTPUT_COST_PER_MILLION", "0"))
+    eval_judge_model: str = os.getenv("EVAL_JUDGE_MODEL", "gpt-4.1-mini")
+    openai_temperature: float = float(os.getenv("OPENAI_TEMPERATURE", "0"))
+    ai_logical_request_stale_seconds: int = int(
+        os.getenv("AI_LOGICAL_REQUEST_STALE_SECONDS", "900")
+    )
 
     @property
     def is_production(self) -> bool:
         return self.environment.lower() == "production"
+
+    def __post_init__(self) -> None:
+        if self.is_production and self.auth_disabled:
+            raise ValueError("AUTH_DISABLED=true is forbidden when ENVIRONMENT=production")
 
 
 settings = Settings()

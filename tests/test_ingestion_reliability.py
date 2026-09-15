@@ -1,6 +1,7 @@
 import pytest
 
-from app import intelligence, jobs, queueing, repository, services
+from app import intelligence, jobs, queueing, repository, services, workflows
+from app.observability import WORKFLOW_RESUME
 
 
 def _goal(client, goal_payload):
@@ -105,6 +106,41 @@ def test_idempotency_key_and_duplicate_worker_execution(client, goal_payload, mo
     assert len(repository.list_recommendations(goal["id"])) == 1
     assert len(repository.list_learning_modules(goal["id"])) == 1
     assert repository.active_plan(goal["id"])["version"] == 2
+
+
+def test_langgraph_resumes_from_persisted_checkpoint(client, goal_payload, monkeypatch):
+    goal = _goal(client, goal_payload)
+    job = _queued_job(goal["id"], "checkpoint-resume")
+    assert repository.start_ingestion_attempt(job["id"])["status"] == "RUNNING"
+    collections = 0
+
+    def collect_once():
+        nonlocal collections
+        collections += 1
+        return [_signal("checkpoint")], []
+
+    original_save = repository.save_recommendation
+    failures = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal failures
+        failures += 1
+        if failures == 1:
+            raise TimeoutError("simulated persistence timeout")
+        return original_save(*args, **kwargs)
+
+    monkeypatch.setattr(intelligence, "collect_signals", collect_once)
+    monkeypatch.setattr(repository, "save_recommendation", fail_once)
+    before=WORKFLOW_RESUME.labels("recommendation")._value.get()
+    with pytest.raises(TimeoutError):
+        workflows.run_recommendation_workflow(job["id"])
+    workflows.run_recommendation_workflow(job["id"])
+    after=WORKFLOW_RESUME.labels("recommendation")._value.get()
+    assert collections == 1
+    assert after-before==1
+    assert repository.get_ingestion_job(job["id"])["status"] == "SUCCEEDED"
+    workflows.run_recommendation_workflow(job["id"])
+    assert WORKFLOW_RESUME.labels("recommendation")._value.get()==after
 
 
 def test_production_redis_failure_is_explicit(client, goal_payload, monkeypatch):

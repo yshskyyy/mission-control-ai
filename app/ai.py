@@ -1,12 +1,16 @@
 import json
 import time
-from typing import Any
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, Literal
 
 from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field
+from jsonschema import Draft202012Validator
 
 from app.config import settings
 from app import repository
+from app.observability import record_logical_outcome, record_provider_attempt, record_telemetry_failure
 
 
 PLAN_PROMPT_VERSION = "plan-v1"
@@ -18,6 +22,89 @@ QUESTION_PROMPT_VERSION = "teaching-question-v2"
 RETEACH_PROMPT_VERSION = "reteach-v2"
 QUIZ_PROMPT_VERSION = "quiz-v1"
 QUIZ_EVALUATION_PROMPT_VERSION = "quiz-evaluation-v1"
+
+FinalOutcome = Literal["MODEL_SUCCESS", "FALLBACK_SUCCESS", "TOTAL_FAILURE"]
+ProviderAttemptStatus = Literal["SUCCEEDED", "FAILED", "SCHEMA_FAILURE"]
+
+_correlation_id: ContextVar[str | None] = ContextVar("ai_correlation_id", default=None)
+_logical_request_id: ContextVar[str | None] = ContextVar("ai_logical_request_id", default=None)
+_last_logical_request_id: ContextVar[str | None] = ContextVar("last_ai_logical_request_id", default=None)
+_last_attempt_id: ContextVar[str | None] = ContextVar("last_ai_attempt_id", default=None)
+_last_attempt_telemetry: ContextVar[dict | None] = ContextVar("last_ai_attempt_telemetry", default=None)
+_last_failure: ContextVar[dict | None] = ContextVar("last_ai_failure", default=None)
+
+
+@contextmanager
+def ai_run_context(correlation_id: str, logical_request_id: str | None = None):
+    correlation_token = _correlation_id.set(correlation_id)
+    logical_token = _logical_request_id.set(logical_request_id)
+    try:
+        yield
+    finally:
+        _logical_request_id.reset(logical_token)
+        _correlation_id.reset(correlation_token)
+
+
+@contextmanager
+def logical_ai_request(logical_request_id: str):
+    token = _logical_request_id.set(logical_request_id)
+    try:
+        yield
+    finally:
+        _logical_request_id.reset(token)
+
+
+def _save_ai_run(*args, **kwargs) -> str | None:
+    kwargs.setdefault("correlation_id", _correlation_id.get())
+    kwargs.setdefault("logical_request_id", _logical_request_id.get())
+    try:
+        return repository.save_ai_run(*args, **kwargs)
+    except Exception as exc:
+        record_telemetry_failure("provider_attempt",exc)
+        return None
+
+def _start_request(run_type: str, entity_id: str, prompt_version: str) -> tuple[str,str]:
+    operation_prefix=_logical_request_id.get()
+    logical_id=(f"{operation_prefix}/{prompt_version}" if operation_prefix
+                else f"{run_type.lower()}:{repository.new_id()}")
+    correlation_id=_correlation_id.get() or logical_id
+    _last_logical_request_id.set(logical_id)
+    try: repository.start_ai_logical_request(logical_id,correlation_id,run_type,entity_id,prompt_version)
+    except Exception as exc: record_telemetry_failure("start_request",exc)
+    return logical_id,correlation_id
+
+def _finalize_request(logical_id: str, run_type: str, outcome: str, *, schema_failure: bool=False,
+                      provider: str | None=None, model: str | None=None) -> str:
+    try:
+        status=repository.finalize_ai_logical_request(
+            logical_id,outcome,schema_failure=schema_failure,provider=provider,model=model
+        )
+    except Exception as exc:
+        record_telemetry_failure("finalize_request",exc)
+        return "TELEMETRY_FAILURE"
+    if status == "FINALIZED":
+        record_logical_outcome(run_type,outcome,schema_failure)
+    return status
+
+
+def _run_fallback(run_type: str, factory):
+    logical_id = _last_logical_request_id.get()
+    failure = _last_failure.get() or {}
+    try:
+        value = factory()
+    except Exception:
+        if logical_id:
+            _finalize_request(
+                logical_id, run_type, "TOTAL_FAILURE",
+                schema_failure=bool(failure.get("schema_failure")), provider="local", model="local",
+            )
+        raise
+    if logical_id:
+        _finalize_request(
+            logical_id, run_type, "FALLBACK_SUCCESS",
+            schema_failure=bool(failure.get("schema_failure")), provider="local", model="local",
+        )
+    return value
 
 
 class StrictOutput(BaseModel):
@@ -62,29 +149,73 @@ def _client() -> OpenAI | None:
 
 
 def _structured_call(run_type: str, entity_id: str, prompt_version: str, prompt: str,
-                     schema_name: str, schema: dict[str, Any]) -> dict | None:
+                     schema_name: str, schema: dict[str, Any], *, finalize_success: bool = True) -> dict | None:
+    logical_id,correlation_id=_start_request(run_type,entity_id,prompt_version)
+    _last_failure.set(None)
     client = _client()
     if not client:
-        repository.save_ai_run(run_type, entity_id, "FALLBACK", "local", prompt_version)
+        _last_failure.set({"category":"NO_PROVIDER","schema_failure":False})
         return None
     started = time.monotonic()
     try:
         response = client.responses.create(
             model=settings.openai_model,
             input=prompt,
+            temperature=getattr(settings, "openai_temperature", 0.0),
             text={"format": {"type": "json_schema", "name": schema_name, "strict": True, "schema": schema}},
         )
-        result = json.loads(response.output_text)
-        repository.save_ai_run(
+        raw_text = response.output_text
+    except Exception as exc:
+        elapsed = time.monotonic() - started
+        _save_ai_run(run_type, entity_id, "FAILED", settings.openai_model, prompt_version,
+            int(elapsed * 1000), type(exc).__name__, provider="openai",correlation_id=correlation_id,
+            logical_request_id=logical_id)
+        record_provider_attempt(run_type,"openai","FAILED",elapsed)
+        _last_failure.set({"category":"PROVIDER_FAILURE","schema_failure":False})
+        return None
+    try:
+        result = json.loads(raw_text)
+    except (json.JSONDecodeError, TypeError) as exc:
+        elapsed = time.monotonic() - started
+        attempt_id=_save_ai_run(run_type, entity_id, "SCHEMA_FAILURE", settings.openai_model,
+            prompt_version, int(elapsed * 1000), f"JSON_DECODE:{type(exc).__name__}",
+            provider="openai",correlation_id=correlation_id,logical_request_id=logical_id)
+        _last_attempt_id.set(attempt_id)
+        record_provider_attempt(run_type,"openai","SCHEMA_FAILURE",elapsed)
+        _last_failure.set({"category":"JSON_DECODE_FAILURE","schema_failure":True})
+        return None
+    try:
+        usage = getattr(response, "usage", None)
+        input_tokens = int(getattr(usage, "input_tokens")) if usage is not None and getattr(usage,"input_tokens",None) is not None else None
+        output_tokens = int(getattr(usage, "output_tokens")) if usage is not None and getattr(usage,"output_tokens",None) is not None else None
+        pricing_available=bool(getattr(settings,"ai_input_cost_per_million",0) or getattr(settings,"ai_output_cost_per_million",0))
+        estimated_cost = ((
+            (input_tokens or 0) * getattr(settings, "ai_input_cost_per_million", 0) +
+            (output_tokens or 0) * getattr(settings, "ai_output_cost_per_million", 0)
+        ) / 1_000_000) if pricing_available and usage is not None else None
+        elapsed = time.monotonic() - started
+        attempt_id=_save_ai_run(
             run_type, entity_id, "SUCCEEDED", settings.openai_model, prompt_version,
-            int((time.monotonic() - started) * 1000),
+            int(elapsed * 1000), provider="openai", input_tokens=input_tokens,
+            output_tokens=output_tokens, estimated_cost=estimated_cost,correlation_id=correlation_id,
+            logical_request_id=logical_id,
         )
+        _last_attempt_id.set(attempt_id); _last_attempt_telemetry.set({"run_type":run_type,"elapsed":elapsed,
+            "input_tokens":input_tokens,"output_tokens":output_tokens,"estimated_cost":estimated_cost})
+        if finalize_success:
+            Draft202012Validator(schema).validate(result)
+            record_provider_attempt(run_type,"openai","SUCCEEDED",elapsed,input_tokens,output_tokens,estimated_cost)
+            _finalize_request(logical_id,run_type,"MODEL_SUCCESS",provider="openai",model=settings.openai_model)
         return result
     except Exception as exc:
-        repository.save_ai_run(
-            run_type, entity_id, "FAILED", settings.openai_model, prompt_version,
-            int((time.monotonic() - started) * 1000), str(exc)[:500],
-        )
+        attempt_id=_last_attempt_id.get()
+        try:
+            if attempt_id: repository.mark_ai_attempt_schema_failure(attempt_id,"JSON_SCHEMA_VALIDATION")
+        except Exception as telemetry_exc: record_telemetry_failure("schema_failure",telemetry_exc)
+        telemetry=_last_attempt_telemetry.get() or {}
+        record_provider_attempt(run_type,"openai","SCHEMA_FAILURE",telemetry.get("elapsed",0),
+            telemetry.get("input_tokens"),telemetry.get("output_tokens"),telemetry.get("estimated_cost"))
+        _last_failure.set({"category":"JSON_SCHEMA_FAILURE","schema_failure":True})
         return None
 
 
@@ -92,24 +223,30 @@ def _pydantic_call(run_type: str, entity_id: str, prompt_version: str, prompt: s
                    output_model: type[StrictOutput]) -> StrictOutput | None:
     result = _structured_call(
         run_type, entity_id, prompt_version, prompt,
-        output_model.__name__, output_model.model_json_schema(),
+        output_model.__name__, output_model.model_json_schema(), finalize_success=False,
     )
     if result is None:
         return None
     try:
-        return output_model.model_validate(result)
+        output=output_model.model_validate(result)
+        telemetry=_last_attempt_telemetry.get() or {}
+        record_provider_attempt(run_type,"openai","SUCCEEDED",telemetry.get("elapsed",0),telemetry.get("input_tokens"),telemetry.get("output_tokens"),telemetry.get("estimated_cost"))
+        _finalize_request(_last_logical_request_id.get(),run_type,"MODEL_SUCCESS",provider="openai",model=settings.openai_model)
+        return output
     except Exception as exc:
-        repository.save_ai_run(
-            run_type, entity_id, "FAILED", settings.openai_model, prompt_version,
-            error=f"Output validation failed: {str(exc)[:420]}",
-        )
+        attempt_id=_last_attempt_id.get(); detail=f"Output validation failed: {str(exc)[:420]}"
+        try:
+            if attempt_id: repository.mark_ai_attempt_schema_failure(attempt_id,detail)
+        except Exception as telemetry_exc: record_telemetry_failure("schema_failure",telemetry_exc)
+        telemetry=_last_attempt_telemetry.get() or {}
+        record_provider_attempt(run_type,"openai","SCHEMA_FAILURE",telemetry.get("elapsed",0),telemetry.get("input_tokens"),telemetry.get("output_tokens"),telemetry.get("estimated_cost"))
+        _last_failure.set({"category":"PYDANTIC_SCHEMA_FAILURE","schema_failure":True})
         return None
 
 
 def _mark_fallback_after_failure(run_type: str, entity_id: str, prompt_version: str) -> None:
-    latest = repository.latest_ai_run(run_type, entity_id)
-    if not latest or latest["status"] != "FALLBACK":
-        repository.save_ai_run(run_type, entity_id, "FALLBACK", "local", prompt_version)
+    # Kept as a compatibility hook for tests. Fallback is finalized only after it succeeds.
+    return None
 
 
 def generate_plan(goal: dict) -> tuple[str, list[dict], str]:
@@ -144,7 +281,7 @@ def generate_plan(goal: dict) -> tuple[str, list[dict], str]:
     result = _structured_call("PLAN_GENERATION", goal["id"], PLAN_PROMPT_VERSION, prompt, "learning_plan", task_schema)
     if result:
         return result["rationale"], result["tasks"], settings.openai_model
-    return _fallback_plan(goal) + ("local-fallback",)
+    return _run_fallback("PLAN_GENERATION", lambda: _fallback_plan(goal) + ("local-fallback",))
 
 
 def _fallback_plan(goal: dict) -> tuple[str, list[dict]]:
@@ -197,19 +334,21 @@ def assess(task: dict, submission: dict) -> tuple[dict, str]:
     result = _structured_call("ASSESSMENT", task["id"], ASSESS_PROMPT_VERSION, prompt, "task_assessment", schema)
     if result:
         return result, settings.openai_model
-    evidence = submission["evidence_text"].strip()
-    passed = len(evidence) >= 120 and any(word in evidence.lower() for word in ["test", "测试", "结果", "实现"])
-    criterion_results = [{
-        "criterion": criterion,
-        "passed": passed,
-        "reason": "提交包含可复查的实现与测试说明。" if passed else "证据过短或缺少实现/测试结果。",
-    } for criterion in criteria]
-    return {
-        "result": "PASSED" if passed else "NEEDS_REVISION",
-        "score": 80 if passed else 45,
-        "feedback": "证据满足本地规则。" if passed else "请补充具体实现、测试命令与运行结果。",
-        "criterion_results": criterion_results,
-    }, "local-fallback"
+    def fallback():
+        evidence = submission["evidence_text"].strip()
+        passed = len(evidence) >= 120 and any(word in evidence.lower() for word in ["test", "测试", "结果", "实现"])
+        criterion_results = [{
+            "criterion": criterion,
+            "passed": passed,
+            "reason": "提交包含可复查的实现与测试说明。" if passed else "证据过短或缺少实现/测试结果。",
+        } for criterion in criteria]
+        return {
+            "result": "PASSED" if passed else "NEEDS_REVISION",
+            "score": 80 if passed else 45,
+            "feedback": "证据满足本地规则。" if passed else "请补充具体实现、测试命令与运行结果。",
+            "criterion_results": criterion_results,
+        }, "local-fallback"
+    return _run_fallback("ASSESSMENT", fallback)
 
 
 def teach(task: dict, messages: list[dict]) -> tuple[str, str]:
@@ -240,7 +379,7 @@ def teach(task: dict, messages: list[dict]) -> tuple[str, str]:
             "这样才能被别人复查。\n\n例如：给定一个固定输入，执行明确命令，并记录预期输出。"
             "\n\n你能用一句话写出自己的输入和预期结果吗？"
         )
-    return reply, "local-fallback"
+    return _run_fallback("TEACHING", lambda: (reply, "local-fallback"))
 
 
 def generate_lesson(task: dict) -> tuple[dict, str]:
@@ -263,7 +402,7 @@ def generate_lesson(task: dict) -> tuple[dict, str]:
         "example": f"以“{task['deliverable']}”为例：给定固定输入，执行明确步骤，记录可观察结果。",
         "check_question": "请说明这个知识点中的输入、关键操作和可观察结果。",
     } for title, objective in topics]
-    return {"title": f"{task['title']}微课程", "sections": sections}, "local-fallback"
+    return _run_fallback("TEACHING", lambda: ({"title": f"{task['title']}微课程", "sections": sections}, "local-fallback"))
 
 
 TEACHING_STRATEGIES = ("simple", "analogy", "example", "code", "step_by_step", "contrast")
@@ -337,8 +476,9 @@ def answer_teaching_question(task: dict, section: dict, messages: list[dict],
         if result.check_question and result.check_question not in reply:
             reply = f"{reply}\n\n{result.check_question}"
         return reply, settings.openai_model, strategy
-    _mark_fallback_after_failure("TEACHING", task["id"], QUESTION_PROMPT_VERSION)
-    return _fallback_teaching(section, question, strategy, weak_points, latest_teacher), "local-fallback", strategy
+    return _run_fallback("TEACHING", lambda: (
+        _fallback_teaching(section, question, strategy, weak_points, latest_teacher), "local-fallback", strategy
+    ))
 
 
 def reteach_section(task: dict, section: dict, weak_points: list[str], mastery: int,
@@ -360,9 +500,10 @@ teaching_strategy 必须返回 {strategy}。"""
         if result.check_question and result.check_question not in reply:
             reply = f"{reply}\n\n{result.check_question}"
         return reply, settings.openai_model, strategy
-    _mark_fallback_after_failure("TEACHING", task["id"], RETEACH_PROMPT_VERSION)
     latest = next((item["content"] for item in reversed(messages) if item["role"] == "TEACHER"), "")
-    return _fallback_teaching(section, "请换一种方式讲", strategy, weak_points, latest), "local-fallback", strategy
+    return _run_fallback("TEACHING", lambda: (
+        _fallback_teaching(section, "请换一种方式讲", strategy, weak_points, latest), "local-fallback", strategy
+    ))
 
 
 def generate_section_quiz(task: dict, section: dict, version: int) -> tuple[dict, str]:
@@ -373,11 +514,11 @@ def generate_section_quiz(task: dict, section: dict, version: int) -> tuple[dict
     )
     if result:
         return result.model_dump(), settings.openai_model
-    return {
+    return _run_fallback("QUIZ_GENERATION", lambda: ({
         "question": f"{section['check_question']} 请同时说明你会如何用测试验证。",
         "expected_answer": "答案应说明输入、操作、可观察结果以及测试验证方法。",
         "rubric": ["输入", "操作", "结果", "测试"],
-    }, "local-fallback"
+    }, "local-fallback"))
 
 
 def evaluate_quiz_answer(task: dict, section: dict, quiz: dict,
@@ -393,16 +534,18 @@ def evaluate_quiz_answer(task: dict, section: dict, quiz: dict,
         data = result.model_dump()
         data["passed"] = data["score"] >= 75 and data["passed"]
         return data, settings.openai_model
-    normalized = answer.lower()
-    matched = [point for point in quiz["rubric"] if point.lower() in normalized]
-    score = round(len(matched) / len(quiz["rubric"]) * 100) if quiz["rubric"] else 0
-    weak = [point for point in quiz["rubric"] if point not in matched]
-    return {
-        "score": score,
-        "passed": score >= 75,
-        "feedback": "回答覆盖了主要评分点。" if score >= 75 else "请补充缺失的评分点后重新作答。",
-        "weak_points": weak,
-    }, "local-fallback"
+    def fallback():
+        normalized = answer.lower()
+        matched = [point for point in quiz["rubric"] if point.lower() in normalized]
+        score = round(len(matched) / len(quiz["rubric"]) * 100) if quiz["rubric"] else 0
+        weak = [point for point in quiz["rubric"] if point not in matched]
+        return {
+            "score": score,
+            "passed": score >= 75,
+            "feedback": "回答覆盖了主要评分点。" if score >= 75 else "请补充缺失的评分点后重新作答。",
+            "weak_points": weak,
+        }, "local-fallback"
+    return _run_fallback("QUIZ_EVALUATION", fallback)
 
 
 def generate_learning_module(goal: dict, recommendation: dict) -> tuple[dict, str]:
@@ -456,4 +599,4 @@ def generate_learning_module(goal: dict, recommendation: dict) -> tuple[dict, st
              "acceptance_criteria": ["示例能够运行", "包含复现步骤", "说明与长期目标的关联"]},
         ],
     }
-    return result, "local-fallback"
+    return _run_fallback("MODULE_GENERATION", lambda: (result, "local-fallback"))

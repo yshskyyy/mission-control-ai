@@ -349,6 +349,11 @@ def ai_runs(user: dict = Depends(current_user)):
     return repository.list_ai_runs(user_id=user["id"])
 
 
+@app.get("/api/internal/metrics-summary")
+def metrics_summary(user: dict = Depends(current_user)):
+    return repository.metrics_summary(user["id"])
+
+
 @app.get("/{full_path:path}", include_in_schema=False)
 def spa_fallback(full_path: str):
     reserved = ("api", "auth", "docs", "redoc", "openapi.json", "health", "metrics", "assets", "static")

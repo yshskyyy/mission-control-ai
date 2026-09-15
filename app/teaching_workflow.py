@@ -9,6 +9,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 
 from app import ai, db, repository
+from app.observability import QUIZ_ATTEMPTS, QUIZ_PASS, WORKFLOW_FAILURES, WORKFLOW_RESUME
 
 
 MAX_RETEACH_COUNT = 3
@@ -53,8 +54,10 @@ def _teaching_context(session: dict, section_id: str) -> tuple[list[str], list[s
 
 
 def _runtime(task_id: str) -> dict:
-    run = repository.latest_ai_run("TEACHING", task_id) or {}
-    return {key: run.get(key) for key in ("provider", "model", "prompt_version", "fallback")}
+    run = repository.latest_ai_logical_request("TEACHING", task_id) or {}
+    return {"provider":run.get("final_provider"),"model":run.get("final_model"),
+            "prompt_version":run.get("prompt_version"),
+            "fallback":run.get("final_outcome")=="FALLBACK_SUCCESS"}
 
 
 def generate_lesson(state: TeachingState) -> dict:
@@ -140,6 +143,9 @@ def evaluate_answer(state: TeachingState) -> dict:
     if not created:
         return {"quiz_score": attempt["score"], "weak_points": attempt["weak_points"],
                 "duplicate_submission": True}
+    QUIZ_ATTEMPTS.inc()
+    if attempt["passed"]:
+        QUIZ_PASS.inc()
     retry_count = 0 if attempt["passed"] else state.get("retry_count", 0) + 1
     repository.add_teaching_message(
         state["teaching_session_id"], "USER", state["user_content"], section["id"], "QUIZ_ANSWER",
@@ -304,7 +310,16 @@ def run_teaching_action(session_id: str, user_id: str, action: str, *,
     connection = sqlite3.connect(checkpoint_path, check_same_thread=False)
     try:
         graph = _build_graph(SqliteSaver(connection))
-        graph.invoke(state, config={"configurable": {"thread_id": session_id}})
+        config={"configurable": {"thread_id": session_id}}
+        snapshot = graph.get_state(config)
+        if snapshot.next:
+            WORKFLOW_RESUME.labels("teaching").inc()
+            graph.invoke(None,config=config)
+        else:
+            graph.invoke(state, config=config)
+    except Exception:
+        WORKFLOW_FAILURES.labels("teaching").inc()
+        raise
     finally:
         connection.close()
     return repository.get_teaching_session(session_id)

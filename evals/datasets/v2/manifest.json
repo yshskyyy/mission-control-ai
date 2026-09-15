@@ -1,0 +1,1 @@
+{"name":"mission-control-core-integrity","version":"2.1.0","created_at":"2026-09-15","description":"Public synthetic integrity cases. public_test is not a secret holdout; private_holdout may be supplied through --dataset-root.","suites":["teaching","planning","assessment","workflow","recommendation"],"splits":["dev","regression","public_test"]}

@@ -22,6 +22,34 @@ Scheduler ── RQ ── Queue worker ── LangGraph ── PostgreSQL
 SQLite remains supported only as a zero-dependency local/test profile. Hosted
 deployments use PostgreSQL and apply the Alembic migration before the API starts.
 
+## Quality and observability loop
+
+Versioned synthetic cases feed separate deterministic rule graders and an optional strict-schema LLM judge. The runner records experiment metadata and compares regression results with the committed baseline. Pull requests never call a paid model; the repository's public test split is not a secret holdout, and real-model evaluation is manual.
+
+AI runs carry nullable `correlation_id`, `logical_request_id`, and `attempt_id`. Evaluation authenticity
+queries only the current correlation rather than scanning historical runs. Workflow evidence comes from
+checkpoint snapshots/history plus persisted job state and side effects. The SQLite test demonstrates
+same-process checkpoint reconnection only, not operating-system process restart recovery.
+
+`ai_logical_requests` owns one business operation and its single final outcome. The compatibility
+`ai_runs` table now represents provider-attempt detail; it owns provider/model latency, optional usage,
+optional cost, and schema/provider failure status. User summaries aggregate outcomes from the former
+and attempt measurements from the latter, preventing fallback chains from becoming multiple requests.
+
+At runtime, `ai_runs` stores user-scoped provider/model/Prompt version, latency, token accounting, configured cost estimate, fallback/failure state and retry count. Prometheus receives bounded operational labels only. The authenticated metrics-summary API computes privacy-safe aggregates. Engineering regression, sampled model quality, operational telemetry and user outcomes remain intentionally separate.
+
+Logical outcomes use an atomic, terminal-only database transition. A completed fallback is recorded
+only after the deterministic implementation returns; a failed fallback becomes `TOTAL_FAILURE`.
+Requests left without a terminal outcome are reported as incomplete and, after
+`AI_LOGICAL_REQUEST_STALE_SECONDS` (default 900 seconds), stale. Stale requests are detected only;
+there is currently no background reconciliation or reaper.
+
+Prometheus counters describe events observed by the current process and reset when that process is
+restarted. The authenticated database summary describes persisted, user-owned history. A telemetry
+storage failure can therefore make the views differ without changing the product response.
+`plan_ai_operations_total` measures completed planning AI operations, not plan persistence.
+Legacy rows without an owner are silently excluded from ordinary user summaries.
+
 ## Boundaries
 
 - `frontend/`: authenticated React SPA and interactive knowledge graph.

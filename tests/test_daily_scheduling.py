@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 from app import services
 from app.scheduling import current_plan_week, local_today
+from app.scheduling import schedule_tasks
 
 
 def _payload(goal_payload, **updates):
@@ -75,3 +76,23 @@ def test_timezone_controls_today_and_current_week():
     tasks = [{"scheduled_date": "2026-09-01"}]
     later = datetime(2026, 9, 15, 12, tzinfo=timezone.utc)
     assert current_plan_week(tasks, "Asia/Shanghai", later) == 3
+
+
+def test_schedule_clock_is_deterministic_across_week_month_and_year_boundaries():
+    task={"week_number":1,"title":"边界任务","description":"验证固定时钟", "estimated_minutes":30,
+          "deliverable":"结果","acceptance_criteria":["可复查","日期正确"]}
+    goal={"daily_hours":1,"study_weekdays":[1,3,5],"timezone":"Asia/Shanghai","deadline":"2027-12-31"}
+    cases=[
+        (datetime(2026,1,31,16,30,tzinfo=timezone.utc),"2026-02-02"),
+        (datetime(2026,12,31,16,30,tzinfo=timezone.utc),"2027-01-01"),
+        (datetime(2026,9,13,16,30,tzinfo=timezone.utc),"2026-09-14"),
+    ]
+    for instant,expected in cases:
+        scheduled,_,_=schedule_tasks([task],goal,now=instant)
+        assert scheduled[0]["scheduled_date"]==expected
+
+
+def test_timezone_boundary_uses_goal_timezone_not_machine_date():
+    instant=datetime(2026,12,31,23,30,tzinfo=timezone.utc)
+    assert local_today("Asia/Shanghai",instant).isoformat()=="2027-01-01"
+    assert local_today("America/Los_Angeles",instant).isoformat()=="2026-12-31"

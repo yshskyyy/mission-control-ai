@@ -19,8 +19,9 @@ def test_create_goal_and_budgeted_plan(client, goal_payload):
     for week in range(1, 5):
         total = sum(t["estimated_minutes"] for t in plan["tasks"] if t["week_number"] == week)
         assert total <= goal_payload["weekly_hours"] * 60
-    runs = client.get("/api/internal/ai-runs").json()
-    assert runs[0]["status"] == "FALLBACK"
+    summary = client.get("/api/internal/metrics-summary").json()
+    assert summary["logical_requests"] == 1
+    assert summary["fallback_successes"] == 1
 
 
 def test_submit_evidence_updates_task(client, goal_payload):
@@ -75,8 +76,9 @@ def test_teaching_session_keeps_conversation_and_ai_runs(client, goal_payload):
     assert reply.status_code == 201
     messages = reply.json()["messages"]
     assert [item["role"] for item in messages] == ["TEACHER", "USER", "TEACHER"]
-    runs = client.get("/api/internal/ai-runs").json()
-    assert sum(run["run_type"] == "TEACHING" for run in runs) == 2
+    summary = client.get("/api/internal/metrics-summary").json()
+    assert summary["logical_requests"] == 3
+    assert summary["fallback_successes"] == 3
 
 
 def test_teaching_rejects_missing_entities(client):
