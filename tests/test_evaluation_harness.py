@@ -1,6 +1,8 @@
 import json
+import re
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
@@ -99,13 +101,27 @@ def test_live_timeout_fallback_is_not_a_pass(tmp_path,monkeypatch):
 
 def test_actual_generated_report_matches_committed_schema(tmp_path):
     result=subprocess.run([sys.executable,"-m","evals.run","--suite","recommendation","--split","regression","--output-dir",str(tmp_path)],capture_output=True,text=True)
-    assert result.returncode==1,result.stdout+result.stderr
+    assert result.returncode==0,result.stdout+result.stderr
     report=json.loads((tmp_path/"latest.json").read_text())
+    assert report["gate_passed"] is True
+    assert report["baseline_approval_status"]=="APPROVED"
     eval_run.validate_report_schema(report)
 
-def test_baseline_has_provenance_and_is_explicitly_unapproved():
-    baseline=json.loads(Path("evals/baseline.json").read_text())
-    assert baseline["approval_status"]=="CANDIDATE_REQUIRES_HUMAN_REVIEW"
+def test_committed_baseline_is_approved_and_has_provenance():
+    baseline=json.loads((eval_run.ROOT/"baseline.json").read_text())
+    assert baseline["approval_status"]=="APPROVED"
+    assert isinstance(baseline["reviewer"], str) and baseline["reviewer"].strip()
+    approved_at=datetime.fromisoformat(baseline["approved_at"].replace("Z", "+00:00"))
+    assert approved_at.utcoffset() is not None
+    assert re.fullmatch(
+        r"https://github\.com/[^/\s]+/[^/\s]+/pull/[1-9][0-9]*(?:#[^\s]+)?",
+        baseline["approval_source"],
+    )
+    assert isinstance(baseline["experiment_id"], str) and baseline["experiment_id"].strip()
+    assert re.fullmatch(r"[0-9a-fA-F]{40}", baseline["source_git_commit"])
+    assert isinstance(baseline["dataset_version"], str) and baseline["dataset_version"].strip()
+    assert re.fullmatch(r"[0-9a-fA-F]{64}", baseline["dataset_hash"])
+    assert baseline["quality_claim"]=="engineering_regression_only"
     assert all(baseline[key] for key in ("experiment_id","source_git_commit","dataset_version","dataset_hash","generated_at","suite_scores","dimension_scores"))
 
 def test_candidate_cannot_overwrite_approved_and_promotion_records_review(tmp_path):
@@ -224,6 +240,13 @@ def test_baseline_state_machine_controls_cli_gate(tmp_path):
     approved_gate=subprocess.run([sys.executable,"-m","evals.run","--suite","recommendation","--split","regression",
         "--baseline",str(approved),"--output-dir",str(tmp_path/"approved-gate")],capture_output=True,text=True)
     assert approved_gate.returncode==0,approved_gate.stdout+approved_gate.stderr
+    rejected=json.loads(approved.read_text()); rejected["approval_status"]="REJECTED"
+    rejected_path=tmp_path/"rejected.json"; rejected_path.write_text(json.dumps(rejected))
+    rejected_gate=subprocess.run([sys.executable,"-m","evals.run","--suite","recommendation","--split","regression",
+        "--baseline",str(rejected_path),"--output-dir",str(tmp_path/"rejected-gate")],capture_output=True,text=True)
+    assert rejected_gate.returncode!=0
+    rejected_report=json.loads((tmp_path/"rejected-gate"/"latest.json").read_text())
+    assert rejected_report["baseline_approval_status"]=="REJECTED" and not rejected_report["gate_passed"]
     stale=json.loads(approved.read_text()); stale["dataset_hash"]="0"*64
     stale_path=tmp_path/"stale.json"; stale_path.write_text(json.dumps(stale))
     stale_gate=subprocess.run([sys.executable,"-m","evals.run","--suite","recommendation","--split","regression",
