@@ -1,3 +1,6 @@
+# Vite build output
+app/static/index.html
+app/static/assets/
 .env
 .env.*
 !.env.example
@@ -9,13 +12,22 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
+# TypeScript generated config files
+frontend/vite.config.js
+frontend/vite.config.d.ts
+frontend/*.tsbuildinfo
 
 memory_data/*.db
 memory_data/*.db-*
 memory_data/daily_briefs/
 memory_data/daily_reviews/
 output/
+evals/reports/
 
 .DS_Store
 .idea/
 .vscode/
+
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
