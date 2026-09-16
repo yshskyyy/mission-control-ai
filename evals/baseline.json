@@ -1,10 +1,10 @@
 {
   "approval_status": "APPROVED",
-  "experiment_id": "f36cee07-09ca-4b7b-8434-e2c8158ad4ed",
-  "source_git_commit": "73d9e7d2842e3c97d195a25ad1832494699e09e4",
+  "experiment_id": "7a295f7a-72bd-4d23-97e4-251af82e2d8f",
+  "source_git_commit": "f094a1ea7b3df66275c1789b2a7ba9db8a7ea354",
   "dataset_version": "2.1.0",
   "dataset_hash": "3b0574fcc368edd92aa42b6caeedacc02bd8fe9555f118f41a93876aaaadc6cb",
-  "generated_at": "2026-09-15T16:53:16.154328+00:00",
+  "generated_at": "2026-09-16T16:02:17.763794+00:00",
   "quality_claim": "engineering_regression_only",
   "minimum_overall_pass_rate": 1.0,
   "minimum_suite_pass_rate": {
@@ -50,6 +50,6 @@
   },
   "maximum_allowed_regression": 0.02,
   "reviewer": "yshskyyy",
-  "approved_at": "2026-09-15T17:01:37.701413+00:00",
+  "approved_at": "2026-09-16T16:02:54.820370+00:00",
   "approval_source": "https://github.com/yshskyyy/mission-control-ai/pull/2"
 }
