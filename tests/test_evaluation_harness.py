@@ -124,6 +124,41 @@ def test_committed_baseline_is_approved_and_has_provenance():
     assert baseline["quality_claim"]=="engineering_regression_only"
     assert all(baseline[key] for key in ("experiment_id","source_git_commit","dataset_version","dataset_hash","generated_at","suite_scores","dimension_scores"))
 
+def test_shallow_checkout_and_invalid_provenance_fail_closed(tmp_path):
+    repo=tmp_path/"checkout"
+    def git(*args):
+        return subprocess.run(["git","-C",str(repo),*args],capture_output=True,text=True,check=True).stdout.strip()
+    subprocess.run(["git","clone","--depth","1",eval_run.ROOT.parent.as_uri(),str(repo)],check=True,capture_output=True)
+    def evaluate(name, baseline=None):
+        destination=tmp_path/name
+        command=[sys.executable,"-m","evals.run","--suite","recommendation","--split","regression",
+                 "--output-dir",str(destination)]
+        if baseline is not None:
+            fixture=tmp_path/f"{name}.json"
+            fixture.write_text(json.dumps(baseline))
+            command.extend(["--baseline",str(fixture)])
+        result=subprocess.run(command,cwd=repo,capture_output=True,text=True)
+        return result,json.loads((destination/"latest.json").read_text())
+    shallow,report=evaluate("shallow")
+    assert git("rev-parse","--is-shallow-repository")=="true"
+    assert shallow.returncode==1 and report["baseline_approval_status"]=="STALE"
+    assert report["baseline_reason"]=="baseline source commit is unavailable or not an ancestor of HEAD"
+    assert report["overall_pass_rate"]==1.0 and not report["gate_passed"]
+    git("fetch","--unshallow")
+    full,report=evaluate("full")
+    assert full.returncode==0,full.stdout+full.stderr
+    assert report["gate_passed"] and report["baseline_approval_status"]=="APPROVED"
+    baseline=json.loads((repo/"evals/baseline.json").read_text())
+    # Create a real, unrelated root commit only in this temporary checkout.
+    unrelated=git("-c","user.name=Test","-c","user.email=test@example.invalid",
+                  "commit-tree","HEAD^{tree}","-m","unrelated provenance fixture")
+    assert git("cat-file","-t",unrelated)=="commit"
+    for name,source in (("missing","0"*40),("unrelated",unrelated)):
+        result,report=evaluate(name,{**baseline,"source_git_commit":source})
+        assert result.returncode==1
+        assert report["baseline_approval_status"]=="STALE" and not report["gate_passed"]
+        assert report["baseline_reason"]=="baseline source commit is unavailable or not an ancestor of HEAD"
+
 def test_candidate_cannot_overwrite_approved_and_promotion_records_review(tmp_path):
     candidate={"approval_status":"CANDIDATE_REQUIRES_HUMAN_REVIEW","quality_claim":"engineering_regression_only",
         "experiment_id":"e","source_git_commit":"abc","dataset_version":"1","dataset_hash":"h",

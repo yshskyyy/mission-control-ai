@@ -295,10 +295,13 @@ def main()->int:
     markdown=(f"# Evaluation {experiment_id}\n\n- Gate: {'PASS' if report['gate_passed'] else 'FAIL'}\n"
               f"- Claim: `{report['quality_claim']}`\n- Dataset: `{manifest.version}` / `{args.split}`\n"
               f"- Active cases: {sum(s['cases'] for s in suite_reports)}\n- Pending cases: {sum(len(s['pending_cases']) for s in suite_reports)}\n")
+    if not report["gate_passed"]:
+        markdown += f"- Baseline status: `{baseline_status}`\n- Baseline reason: {baseline_reason or 'none; see gate checks'}\n"
     (args.output_dir/f"{experiment_id}.md").write_text(markdown); (args.output_dir/"latest.md").write_text(markdown)
     if args.write_baseline_candidate: write_candidate(_baseline_candidate(report),args.write_baseline_candidate)
     print(json.dumps({"experiment_id":experiment_id,"gate_passed":report["gate_passed"],"quality_claim":report["quality_claim"],
-        "overall_pass_rate":report["overall_pass_rate"],"pending_cases":sum(len(s["pending_cases"]) for s in suite_reports)},ensure_ascii=False))
+        "overall_pass_rate":report["overall_pass_rate"],"pending_cases":sum(len(s["pending_cases"]) for s in suite_reports),
+        "baseline_approval_status":baseline_status,"baseline_reason":baseline_reason},ensure_ascii=False))
     return 0 if report["gate_passed"] or args.no_gate else 1
 
 if __name__=="__main__": sys.exit(main())
