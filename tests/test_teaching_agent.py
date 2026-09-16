@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 from app import auth
 from app import ai
+from app.observability import WORKFLOW_RESUME
 
 
 PASSING_ANSWER = "输入是固定样例，操作是运行实现，结果是可观察输出，最后用测试验证。"
@@ -20,6 +21,7 @@ def _active_quiz(session):
 
 def test_structured_course_questions_reteach_quiz_and_mastery(client, goal_payload):
     goal, _, session = _course(client, goal_payload)
+    resume_before=WORKFLOW_RESUME.labels("teaching")._value.get()
     assert len(session["sections"]) == 3
     assert [section["status"] for section in session["sections"]] == ["CURRENT", "LOCKED", "LOCKED"]
     assert session["current_section_id"] == session["sections"][0]["id"]
@@ -32,6 +34,7 @@ def test_structured_course_questions_reteach_quiz_and_mastery(client, goal_paylo
         assert response.status_code == 201
         session = response.json()
     persisted = client.get(f"/api/teaching-sessions/{session['id']}").json()
+    assert WORKFLOW_RESUME.labels("teaching")._value.get()==resume_before
     assert all(any(question in message["content"] for message in persisted["messages"])
                for question in ("输入具体指什么？", "这个结果应该如何观察？"))
 

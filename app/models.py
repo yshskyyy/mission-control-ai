@@ -1,5 +1,5 @@
 from sqlalchemy import (
-    CheckConstraint, Column, ForeignKey, Index, Integer, MetaData, Numeric, String, Table, Text,
+    Boolean, CheckConstraint, Column, ForeignKey, Index, Integer, MetaData, Numeric, String, Table, Text,
     UniqueConstraint,
 )
 
@@ -232,7 +232,40 @@ ai_runs = Table(
     Column("model", Text, nullable=False), Column("prompt_version", Text, nullable=False),
     Column("latency_ms", Integer, nullable=False, server_default="0"), Column("error", Text),
     Column("created_at", String(40), nullable=False), Column("user_id", String(36), ForeignKey("users.id")),
+    Column("provider", String(30), nullable=False, server_default="local"),
+    Column("input_tokens", Integer),
+    Column("output_tokens", Integer),
+    Column("estimated_cost", Numeric(14, 8)),
+    Column("retry_count", Integer, nullable=False, server_default="0"),
+    Column("correlation_id", String(64)),
+    Column("logical_request_id", String(100), ForeignKey("ai_logical_requests.logical_request_id")),
+    Column("attempt_id", String(64)),
 )
+
+Index("idx_ai_runs_correlation", ai_runs.c.correlation_id, ai_runs.c.logical_request_id, ai_runs.c.created_at)
+Index("idx_ai_runs_user_created", ai_runs.c.user_id, ai_runs.c.created_at)
+Index("uq_ai_runs_attempt_id", ai_runs.c.attempt_id, unique=True)
+
+ai_logical_requests = Table(
+    "ai_logical_requests", metadata,
+    Column("logical_request_id", String(100), primary_key=True),
+    Column("correlation_id", String(64), nullable=False),
+    Column("run_type", String(30), nullable=False),
+    Column("prompt_version", Text, nullable=False),
+    Column("entity_id", String(36), nullable=False),
+    Column("user_id", String(36), ForeignKey("users.id")),
+    Column("final_outcome", String(30)),
+    Column("provider_backed", Boolean, nullable=False, server_default="0"),
+    Column("schema_failure", Boolean, nullable=False, server_default="0"),
+    Column("attempt_count", Integer, nullable=False, server_default="0"),
+    Column("final_provider", String(30)), Column("final_model", Text),
+    Column("created_at", String(40), nullable=False), Column("completed_at", String(40)),
+    Column("started_at", String(40), nullable=False), Column("finalized_at", String(40)),
+    CheckConstraint("final_outcome IS NULL OR final_outcome IN ('MODEL_SUCCESS','FALLBACK_SUCCESS','TOTAL_FAILURE')"),
+    CheckConstraint("attempt_count >= 0"),
+)
+Index("idx_ai_logical_user_created", ai_logical_requests.c.user_id, ai_logical_requests.c.created_at)
+Index("idx_ai_logical_correlation", ai_logical_requests.c.correlation_id, ai_logical_requests.c.logical_request_id)
 
 Index("idx_goals_user", learning_goals.c.user_id, learning_goals.c.status)
 Index("idx_tasks_plan_week", learning_tasks.c.plan_version_id, learning_tasks.c.week_number, learning_tasks.c.position)

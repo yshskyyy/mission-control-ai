@@ -1,9 +1,11 @@
 import json
+from datetime import datetime
 from uuid import uuid4
 
 from app import repository
 from app.ai import assess, generate_learning_module, generate_plan
 from app.scheduling import SchedulingError, current_plan_week, local_today, schedule_tasks
+from app.observability import DEADLINE_RISK
 
 
 class NotFoundError(Exception):
@@ -47,7 +49,7 @@ def _planner_split_oversized(tasks: list[dict], daily_minutes: int) -> list[dict
     return result
 
 
-def create_plan(goal_id: str) -> dict:
+def create_plan(goal_id: str, *, now: datetime | None = None) -> dict:
     goal = repository.get_goal(goal_id)
     if not goal:
         raise NotFoundError("Goal not found")
@@ -73,13 +75,15 @@ def create_plan(goal_id: str) -> dict:
             for task in week_tasks:
                 task["estimated_minutes"] = max(20, int(task["estimated_minutes"] * ratio))
     try:
-        tasks, risks, suggestions = schedule_tasks(tasks, goal)
+        tasks, risks, suggestions = schedule_tasks(tasks, goal, now=now)
     except SchedulingError as exc:
         raise PlanningError(exc.code, str(exc), exc.task) from exc
     plan = repository.save_plan(
         goal_id, f"{rationale}（生成器：{evaluator}）", tasks,
         planning_risks=risks, adjustment_suggestions=suggestions,
     )
+    if any(risk.get("code") == "DEADLINE_RISK" for risk in risks):
+        DEADLINE_RISK.inc()
     repository.upsert_knowledge_node(
         goal_id, goal["title"], "长期目标", goal["desired_outcome"], 100, "GOAL"
     )

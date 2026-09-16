@@ -1,6 +1,7 @@
 import json
 
 from app.db import LOCAL_USER_ID, connection, new_id, utc_now
+from app.config import settings
 
 
 def rows(items):
@@ -769,29 +770,112 @@ def set_review_decision(review_id: str, status: str, plan_id: str | None = None)
 
 
 def save_ai_run(run_type: str, entity_id: str, status: str, model: str, prompt_version: str,
-                latency_ms: int = 0, error: str | None = None) -> None:
+                latency_ms: int = 0, error: str | None = None, provider: str | None = None,
+                input_tokens: int = 0, output_tokens: int = 0,
+                estimated_cost: float = 0.0, retry_count: int = 0,
+                correlation_id: str | None = None, logical_request_id: str | None = None,
+                attempt_id: str | None = None) -> str:
+    attempt_id = attempt_id or new_id()
     user_id = ai_run_user_id(run_type, entity_id)
     with connection() as conn:
+        if logical_request_id:
+            logical = conn.execute(
+                "SELECT user_id,correlation_id FROM ai_logical_requests WHERE logical_request_id=?",
+                (logical_request_id,),
+            ).fetchone()
+            if logical is None:
+                raise ValueError("logical request does not exist")
+            if logical["user_id"] != user_id:
+                raise ValueError("logical request user does not match provider attempt")
+            if logical["correlation_id"] != correlation_id:
+                raise ValueError("logical request correlation does not match provider attempt")
         conn.execute(
             """INSERT INTO ai_runs
-            (id,run_type,entity_id,status,model,prompt_version,latency_ms,error,created_at,user_id)
-            VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (new_id(), run_type, entity_id, status, model, prompt_version, latency_ms, error,
-             utc_now(), user_id),
+            (id,run_type,entity_id,status,model,prompt_version,latency_ms,error,created_at,user_id,
+             provider,input_tokens,output_tokens,estimated_cost,retry_count,correlation_id,
+             logical_request_id,attempt_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (attempt_id, run_type, entity_id, status, model, prompt_version, latency_ms, error,
+             utc_now(), user_id, provider or ("local" if status == "FALLBACK" else "openai"),
+             input_tokens, output_tokens, estimated_cost, retry_count, correlation_id,
+             logical_request_id, attempt_id),
         )
+        if logical_request_id:
+            conn.execute("UPDATE ai_logical_requests SET attempt_count=attempt_count+1,provider_backed=1 WHERE logical_request_id=?",
+                         (logical_request_id,))
+    return attempt_id
 
 
-def latest_ai_run(run_type: str, entity_id: str) -> dict | None:
+def start_ai_logical_request(logical_request_id: str, correlation_id: str, run_type: str,
+                             entity_id: str, prompt_version: str) -> None:
+    user_id=ai_run_user_id(run_type,entity_id)
+    started_at=utc_now()
     with connection() as conn:
+        conn.execute("""INSERT INTO ai_logical_requests
+            (logical_request_id,correlation_id,run_type,prompt_version,entity_id,user_id,created_at,started_at)
+            VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(logical_request_id) DO NOTHING""",
+            (logical_request_id,correlation_id,run_type,prompt_version,entity_id,user_id,started_at,started_at))
+
+
+def finalize_ai_logical_request(logical_request_id: str, outcome: str, *,
+                                schema_failure: bool = False, provider: str | None = None,
+                                model: str | None = None) -> str:
+    with connection() as conn:
+        finalized_at=utc_now()
+        result = conn.execute("""UPDATE ai_logical_requests SET final_outcome=?,schema_failure=?,
+            final_provider=?,final_model=?,completed_at=?,finalized_at=? WHERE logical_request_id=?
+            AND final_outcome IS NULL""",
+            (outcome,int(schema_failure),provider,model,finalized_at,finalized_at,logical_request_id))
+        if result.rowcount == 1:
+            return "FINALIZED"
+        current = conn.execute(
+            "SELECT final_outcome,schema_failure FROM ai_logical_requests WHERE logical_request_id=?",
+            (logical_request_id,),
+        ).fetchone()
+        if current is None:
+            return "MISSING"
+        if current["final_outcome"] == outcome and bool(current["schema_failure"]) == schema_failure:
+            return "ALREADY_FINALIZED"
+        return "CONFLICT"
+
+
+def get_ai_logical_request(logical_request_id: str) -> dict | None:
+    with connection() as conn:
+        row=conn.execute("SELECT * FROM ai_logical_requests WHERE logical_request_id=?",
+                         (logical_request_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def latest_ai_logical_request(run_type: str, entity_id: str) -> dict | None:
+    with connection() as conn:
+        row=conn.execute("""SELECT * FROM ai_logical_requests WHERE run_type=? AND entity_id=?
+            ORDER BY created_at DESC,logical_request_id DESC LIMIT 1""",(run_type,entity_id)).fetchone()
+    return dict(row) if row else None
+
+
+def mark_ai_attempt_schema_failure(attempt_id: str, error: str) -> None:
+    with connection() as conn:
+        conn.execute("UPDATE ai_runs SET status='SCHEMA_FAILURE',error=? WHERE id=?",(error,attempt_id))
+
+
+def latest_ai_run(run_type: str, entity_id: str, correlation_id: str | None = None,
+                  logical_request_id: str | None = None) -> dict | None:
+    with connection() as conn:
+        clauses=["run_type=?","entity_id=?"]; values=[run_type,entity_id]
+        if correlation_id is not None:
+            clauses.append("correlation_id=?"); values.append(correlation_id)
+        if logical_request_id is not None:
+            clauses.append("logical_request_id=?"); values.append(logical_request_id)
         row = conn.execute(
-            """SELECT status,model,prompt_version,latency_ms,error,created_at
-            FROM ai_runs WHERE run_type=? AND entity_id=? ORDER BY created_at DESC,id DESC LIMIT 1""",
-            (run_type, entity_id),
+            f"""SELECT status,model,prompt_version,latency_ms,error,created_at,provider,
+            input_tokens,output_tokens,estimated_cost,retry_count,correlation_id,logical_request_id,attempt_id
+            FROM ai_runs WHERE {' AND '.join(clauses)} ORDER BY created_at DESC,id DESC LIMIT 1""",
+            values,
         ).fetchone()
     if not row:
         return None
     result = dict(row)
-    result["provider"] = "local" if result["status"] == "FALLBACK" else "openai"
+    result["provider"] = result.get("provider") or ("local" if result["status"] == "FALLBACK" else "openai")
     result["fallback"] = result["status"] == "FALLBACK"
     return result
 
@@ -828,3 +912,67 @@ def list_ai_runs(limit: int = 50, user_id: str | None = None) -> list[dict]:
                 "SELECT * FROM ai_runs ORDER BY created_at DESC LIMIT ?", (limit,)
             ).fetchall()
         return rows(result)
+
+
+def list_ai_runs_for_correlation(correlation_id: str) -> list[dict]:
+    with connection() as conn:
+        return rows(conn.execute(
+            "SELECT * FROM ai_runs WHERE correlation_id=? ORDER BY created_at,id",
+            (correlation_id,),
+        ).fetchall())
+
+
+def list_ai_logical_requests_for_correlation(correlation_id: str) -> list[dict]:
+    with connection() as conn:
+        return rows(conn.execute(
+            "SELECT * FROM ai_logical_requests WHERE correlation_id=? ORDER BY created_at,logical_request_id",
+            (correlation_id,),
+        ).fetchall())
+
+
+def metrics_summary(user_id: str) -> dict:
+    """Return only user-scoped aggregates; no prompts, content, identifiers, tokens, or errors."""
+    with connection() as conn:
+        attempts = conn.execute(
+            "SELECT latency_ms,input_tokens,output_tokens,estimated_cost FROM ai_runs WHERE user_id=?",
+            (user_id,),
+        ).fetchall()
+        all_logical = conn.execute("SELECT * FROM ai_logical_requests WHERE user_id=?", (user_id,)).fetchall()
+        quiz = conn.execute(
+            """SELECT COUNT(*) attempts,COALESCE(SUM(qa.passed),0) passed FROM quiz_attempts qa
+            JOIN quizzes q ON q.id=qa.quiz_id JOIN teaching_sessions ts ON ts.id=q.session_id
+            JOIN learning_tasks lt ON lt.id=ts.task_id JOIN plan_versions pv ON pv.id=lt.plan_version_id
+            JOIN learning_goals lg ON lg.id=pv.goal_id WHERE lg.user_id=?""", (user_id,),
+        ).fetchone()
+    latencies = sorted(int(row["latency_ms"]) for row in attempts if row["latency_ms"] is not None)
+    percentile = lambda p: latencies[min(len(latencies) - 1, max(0, int((len(latencies) * p + .999999)) - 1))] if latencies else None
+    from datetime import datetime, timezone
+    completed_rows=[row for row in all_logical if row["final_outcome"] is not None]
+    incomplete=[row for row in all_logical if row["final_outcome"] is None]
+    now=datetime.now(timezone.utc)
+    threshold=max(1, int(getattr(settings,"ai_logical_request_stale_seconds",900)))
+    stale=sum((now-datetime.fromisoformat(row.get("started_at") or row["created_at"])).total_seconds() >= threshold for row in incomplete)
+    completed=len(completed_rows); provider_backed=[row for row in completed_rows if row["provider_backed"]]
+    usage_known=sum(row["input_tokens"] is not None and row["output_tokens"] is not None for row in attempts)
+    priced=sum(row["estimated_cost"] is not None for row in attempts)
+    total_attempts=len(attempts)
+    return {
+        "logical_requests": completed,"completed_count":completed,
+        "incomplete_count":len(incomplete),"stale_incomplete_count":stale,
+        "provider_attempts":total_attempts,"total_provider_attempt_count":total_attempts,
+        "model_successes":sum(row["final_outcome"]=="MODEL_SUCCESS" for row in completed_rows),
+        "fallback_successes":sum(row["final_outcome"]=="FALLBACK_SUCCESS" for row in completed_rows),
+        "total_failures":sum(row["final_outcome"]=="TOTAL_FAILURE" for row in completed_rows),
+        "fallback_rate":(sum(row["final_outcome"]=="FALLBACK_SUCCESS" for row in completed_rows)/completed if completed else None),
+        "schema_failure_rate":(sum(bool(row["schema_failure"]) for row in provider_backed)/len(provider_backed) if provider_backed else None),
+        "retry_rate":None,"retry_measurement_available":False,
+        "latency_ms": {"p50": percentile(.50), "p95": percentile(.95),"sample_count":len(latencies)},
+        "estimated_cost":round(sum(float(row["estimated_cost"]) for row in attempts if row["estimated_cost"] is not None),8) if priced else None,
+        "cost_estimate_available":priced == total_attempts and total_attempts > 0,
+        "usage_available":usage_known == total_attempts and total_attempts > 0,
+        "usage_known_attempt_count":usage_known,
+        "usage_coverage_rate":usage_known/total_attempts if total_attempts else None,
+        "priced_attempt_count":priced,
+        "pricing_coverage_rate":priced/total_attempts if total_attempts else None,
+        "quiz_attempts": int(quiz["attempts"]), "quiz_passes": int(quiz["passed"]),
+    }

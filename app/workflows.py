@@ -9,6 +9,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 
 from app import db, intelligence, repository
+from app.observability import WORKFLOW_FAILURES, WORKFLOW_RESUME
 
 
 class RecommendationState(TypedDict, total=False):
@@ -74,8 +75,34 @@ def run_recommendation_workflow(job_id: str) -> None:
         config = {"configurable": {"thread_id": job_id}}
         snapshot = graph.get_state(config)
         if snapshot.next:
+            WORKFLOW_RESUME.labels("recommendation").inc()
             graph.invoke(None, config=config)
         else:
             graph.invoke({"job_id": job_id, "goal_id": job["goal_id"]}, config=config)
+    except Exception:
+        WORKFLOW_FAILURES.labels("recommendation").inc()
+        raise
+    finally:
+        connection.close()
+
+
+def recommendation_checkpoint_evidence(job_id: str) -> dict:
+    """Read persisted LangGraph checkpoint evidence without executing the graph."""
+    checkpoint_path = Path(db.settings.database_path).with_suffix(".workflows.db")
+    if not checkpoint_path.exists():
+        return {"checkpoint_exists": False, "snapshot_next": [], "history": [],
+                "limitation": "No checkpoint database exists."}
+    connection = sqlite3.connect(checkpoint_path, check_same_thread=False)
+    try:
+        graph = _build_graph(SqliteSaver(connection))
+        config = {"configurable": {"thread_id": job_id}}
+        snapshot = graph.get_state(config)
+        history = []
+        for item in graph.get_state_history(config):
+            history.append({"next": list(item.next), "values": dict(item.values),
+                            "created_at": item.created_at})
+        return {"checkpoint_exists": True, "snapshot_next": list(snapshot.next),
+                "history": history,
+                "limitation": "Same-process checkpoint reconnection; process restart is not exercised."}
     finally:
         connection.close()

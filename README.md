@@ -82,7 +82,24 @@ make check
 docker compose config -q
 ```
 
-测试覆盖后端业务、Teaching Agent 和异步可靠性，并包含 22 个计划、Teaching、评估及推荐质量案例。详见 [docs/evaluation.md](docs/evaluation.md)。
+CI 使用版本化 regression 数据集进行免费、确定性的工程门禁；它不代表真实模型语义质量。
+仓库中的 `public_test` 是公开测试集，不是真正保密的 holdout。真实模型评测只通过手动 workflow 或显式命令运行：
+
+CI 回归只接受经人工审阅的 `APPROVED` baseline；candidate、rejected、stale 或缺失 baseline
+都会明确失败。SQLite Workflow 评测覆盖同进程重新连接 checkpoint，不代表进程重启恢复验证。
+
+`/metrics` 只代表当前 API 进程，RQ worker 的进程内计数不会自动汇总。用户级持久聚合请使用
+需要 JWT 的 `/api/internal/metrics-summary`；历史 `user_id=NULL` 数据会被排除。
+
+```bash
+python -m evals.run --suite all --split regression
+OPENAI_API_KEY=... python -m evals.run --suite all --split public_test --live --repetitions 3
+```
+
+每次运行生成带 experiment ID、Git/模型/Prompt 元数据、P50/P95、token、成本估算和基线差异的
+JSON 与 Markdown 报告。详见 [docs/evaluation.md](docs/evaluation.md)。
+
+测试覆盖后端业务、Teaching Agent、异步可靠性和版本化质量数据集。详见 [docs/evaluation.md](docs/evaluation.md)。
 
 ## 手工验收路径
 

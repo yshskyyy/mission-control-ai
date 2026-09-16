@@ -1,0 +1,34 @@
+name: Real-model evaluation
+
+on:
+  workflow_dispatch:
+    inputs:
+      repetitions:
+        description: Runs per case
+        required: true
+        default: "3"
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - name: Run public test split against configured model
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: python -m evals.run --suite all --split public_test --live --repetitions "${{ inputs.repetitions }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: real-model-evaluation
+          path: evals/reports/
+          retention-days: 14

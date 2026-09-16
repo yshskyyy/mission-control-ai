@@ -17,6 +17,12 @@ branch_labels = None
 depends_on = None
 
 
+def _batch(table_name: str):
+    # copy_from retains even unnamed CHECK constraints during SQLite table rebuilds.
+    table = sa.Table(table_name, sa.MetaData(), autoload_with=op.get_bind())
+    return op.batch_alter_table(table_name, copy_from=table)
+
+
 def _legacy_schedule(weekly: Decimal) -> tuple[Decimal, list[int]]:
     valid = [day for day in range(1, 8) if Decimal("0.5") <= weekly / day <= 12]
     days = min(valid, key=lambda day: (abs(day - 5), -day))
@@ -28,11 +34,11 @@ def upgrade() -> None:
     inspector = sa.inspect(bind)
     goal_columns = {column["name"]: column for column in inspector.get_columns("learning_goals")}
     checks = inspector.get_check_constraints("learning_goals")
-    for constraint in checks:
-        sqltext = constraint.get("sqltext") or ""
-        if "weekly_hours" in sqltext and "84" not in sqltext and constraint.get("name"):
-            op.drop_constraint(constraint["name"], "learning_goals", type_="check")
-    with op.batch_alter_table("learning_goals") as batch:
+    with _batch("learning_goals") as batch:
+        for constraint in checks:
+            sqltext = constraint.get("sqltext") or ""
+            if "weekly_hours" in sqltext and "84" not in sqltext and constraint.get("name"):
+                batch.drop_constraint(constraint["name"], type_="check")
         if isinstance(goal_columns["weekly_hours"]["type"], sa.Integer):
             batch.alter_column("weekly_hours", existing_type=sa.Integer(), type_=sa.Numeric(12, 6), nullable=False)
         if "daily_hours" not in goal_columns:
@@ -57,19 +63,19 @@ def upgrade() -> None:
             budget_derivation="LEGACY_WEEKLY_PREFER_FIVE_WEEKDAYS_EXACT_BUDGET",
         ))
     if "daily_hours" not in goal_columns:
-        with op.batch_alter_table("learning_goals") as batch:
+        with _batch("learning_goals") as batch:
             batch.alter_column("daily_hours", nullable=False)
             batch.alter_column("study_weekdays", nullable=False)
             batch.alter_column("timezone", nullable=False)
             batch.alter_column("budget_derivation", nullable=False)
     plan_columns = {column["name"] for column in sa.inspect(bind).get_columns("plan_versions")}
-    with op.batch_alter_table("plan_versions") as batch:
+    with _batch("plan_versions") as batch:
         if "planning_risks" not in plan_columns:
             batch.add_column(sa.Column("planning_risks", sa.Text(), nullable=False, server_default="[]"))
         if "adjustment_suggestions" not in plan_columns:
             batch.add_column(sa.Column("adjustment_suggestions", sa.Text(), nullable=False, server_default="[]"))
     task_columns = {column["name"] for column in sa.inspect(bind).get_columns("learning_tasks")}
-    with op.batch_alter_table("learning_tasks") as batch:
+    with _batch("learning_tasks") as batch:
         if "scheduled_date" not in task_columns:
             batch.add_column(sa.Column("scheduled_date", sa.String(10)))
     tasks = sa.Table("learning_tasks", sa.MetaData(), autoload_with=bind)
@@ -98,17 +104,18 @@ def upgrade() -> None:
                 adjustment_suggestions=json.dumps(["请让 Planner 将旧超长任务重新拆分"]),
             ))
     if "scheduled_date" not in task_columns:
-        with op.batch_alter_table("learning_tasks") as batch:
+        with _batch("learning_tasks") as batch:
             batch.alter_column("scheduled_date", nullable=False)
 
 
 def downgrade() -> None:
-    with op.batch_alter_table("learning_tasks") as batch:
+    with _batch("learning_tasks") as batch:
         batch.drop_column("scheduled_date")
-    with op.batch_alter_table("plan_versions") as batch:
+    with _batch("plan_versions") as batch:
         batch.drop_column("adjustment_suggestions")
         batch.drop_column("planning_risks")
-    with op.batch_alter_table("learning_goals") as batch:
+    with _batch("learning_goals") as batch:
+        batch.drop_constraint("ck_goal_daily_hours", type_="check")
         batch.drop_column("budget_derivation")
         batch.drop_column("timezone")
         batch.drop_column("study_weekdays")
