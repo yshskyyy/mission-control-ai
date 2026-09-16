@@ -28,7 +28,9 @@ def upgrade() -> None:
     _add_column("teaching_sessions", session_columns, sa.Column("updated_at", sa.String(40)))
     if "updated_at" not in session_columns:
         op.execute(sa.text("UPDATE teaching_sessions SET updated_at=created_at"))
-        op.alter_column("teaching_sessions", "updated_at", nullable=False)
+        table = sa.Table("teaching_sessions", sa.MetaData(), autoload_with=bind)
+        with op.batch_alter_table("teaching_sessions", copy_from=table) as batch:
+            batch.alter_column("updated_at", existing_type=sa.String(40), nullable=False)
 
     message_columns = {column["name"] for column in inspector.get_columns("teaching_messages")}
     _add_column("teaching_messages", message_columns, sa.Column("section_id", sa.String(36)))
@@ -73,8 +75,12 @@ def downgrade() -> None:
     op.drop_table("quiz_attempts")
     op.drop_table("quizzes")
     op.drop_table("lesson_sections")
-    for column in ("idempotency_key", "message_type", "section_id"):
-        op.drop_column("teaching_messages", column)
-    for column in ("updated_at", "mastery", "retry_count", "last_user_action",
-                   "lesson_progress", "current_section_id"):
-        op.drop_column("teaching_sessions", column)
+    for name, columns in (
+        ("teaching_messages", ("idempotency_key", "message_type", "section_id")),
+        ("teaching_sessions", ("updated_at", "mastery", "retry_count", "last_user_action",
+                               "lesson_progress", "current_section_id")),
+    ):
+        table = sa.Table(name, sa.MetaData(), autoload_with=op.get_bind())
+        with op.batch_alter_table(name, copy_from=table) as batch:
+            for column in columns:
+                batch.drop_column(column)

@@ -24,5 +24,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    for name in ("prompt_version", "model", "provider", "teaching_strategy"):
-        op.drop_column("teaching_messages", name)
+    table = sa.Table("teaching_messages", sa.MetaData(), autoload_with=op.get_bind())
+    with op.batch_alter_table("teaching_messages", copy_from=table) as batch:
+        for name in ("prompt_version", "model", "provider", "teaching_strategy"):
+            batch.drop_column(name)
